@@ -202,6 +202,9 @@ def claim() -> sqlite3.Row | None:
     db = connect()
     try:
         db.execute("BEGIN IMMEDIATE")
+        if setting(db, "budget_epoch") is None:
+            db.rollback()
+            return None
         current, _, _ = balance(db)
         if current <= 0:
             db.rollback()

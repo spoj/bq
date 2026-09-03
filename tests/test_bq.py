@@ -57,6 +57,10 @@ class BqTest(unittest.TestCase):
         with patch("time.time", return_value=1003):
             self.assertIsNone(bq.claim())
 
+    def test_worker_waits_when_budget_is_not_configured(self):
+        args = argparse.Namespace(once=True, direct=True, poll_interval=0)
+        bq.worker(args)
+
     def test_direct_worker_records_success(self):
         self.configure()
         self.add()
