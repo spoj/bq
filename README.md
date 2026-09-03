@@ -56,15 +56,18 @@ bq worker --direct       # bypass systemd-run
 
 `budget set` starts a new accounting epoch. The initial balance defaults to one hour of credit.
 
-## Run continuously
+## Deploy on this machine
 
-Install the example user service:
+After committing and pushing:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp bq-worker.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now bq-worker
+./deploy-local.sh
+```
+
+This installs the pushed commit with `uv tool install`, copies and enables `bq-worker.service`, and restarts the worker. Follow it with:
+
+```bash
+journalctl --user -u bq-worker -f
 ```
 
 Environment variables needed by agents launched with `systemd-run` must be available to the systemd user manager or configured on the worker service. Agents using credentials stored in their home directory need no extra setup.
