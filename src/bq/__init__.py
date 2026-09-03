@@ -1,5 +1,7 @@
 import argparse
+import fcntl
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -198,6 +200,12 @@ def charge(args: argparse.Namespace) -> None:
     print(money(current))
 
 
+def concurrency_limit(amount: int, factor: float) -> int:
+    if amount <= 0:
+        return 0
+    return max(1, math.floor(math.sqrt(amount / float(MICROS)) * factor))
+
+
 def claim() -> sqlite3.Row | None:
     db = connect()
     try:
@@ -243,49 +251,76 @@ def recover_running() -> None:
         )
 
 
-def run_task(task: sqlite3.Row, direct: bool = False) -> None:
+def start_task(task: sqlite3.Row, direct: bool) -> subprocess.Popen:
     argv = json.loads(task["argv"])
     env = os.environ.copy()
     env["BQ_TASK_ID"] = str(task["id"])
     env["BQ_DB"] = str(db_path())
     if direct:
-        result = subprocess.run(argv, cwd=task["cwd"], env=env, check=False)
-    else:
-        command = [
-            "systemd-run",
-            "--user",
-            "--wait",
-            "--quiet",
-            f"--unit=bq-task-{task['id']}",
-            f"--working-directory={task['cwd']}",
-            f"--setenv=BQ_TASK_ID={task['id']}",
-            f"--setenv=BQ_DB={db_path()}",
-            "--",
-            *argv,
-        ]
-        result = subprocess.run(command, check=False)
-    status = "succeeded" if result.returncode == 0 else "failed"
+        return subprocess.Popen(argv, cwd=task["cwd"], env=env)
+    command = [
+        "systemd-run",
+        "--user",
+        "--wait",
+        "--quiet",
+        f"--unit=bq-task-{task['id']}",
+        f"--working-directory={task['cwd']}",
+        f"--setenv=BQ_TASK_ID={task['id']}",
+        f"--setenv=BQ_DB={db_path()}",
+        "--",
+        *argv,
+    ]
+    return subprocess.Popen(command, env=env)
+
+
+def finish_task(task: sqlite3.Row, returncode: int) -> None:
+    status = "succeeded" if returncode == 0 else "failed"
     with connect() as db:
         current = get_task(db, task["id"])
         if current["status"] == "running":
             db.execute(
                 "UPDATE tasks SET status = ?, finished_at = ?, exit_code = ? WHERE id = ?",
-                (status, int(time.time()), result.returncode, task["id"]),
+                (status, int(time.time()), returncode, task["id"]),
             )
 
 
 def worker(args: argparse.Namespace) -> None:
-    recover_running()
-    while True:
-        task = claim()
-        if task:
-            run_task(task, args.direct)
+    if args.concurrency_factor <= 0:
+        raise SystemExit("concurrency factor must be positive")
+    lock_path = db_path().with_suffix(".worker.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("another worker is already running")
+        recover_running()
+        running = {}
+        started = False
+        while True:
+            try:
+                with connect() as db:
+                    current, _, _ = balance(db)
+            except SystemExit:
+                current = 0
+            limit = concurrency_limit(current, args.concurrency_factor)
+            while len(running) < limit and not (args.once and started):
+                task = claim()
+                if not task:
+                    break
+                running[task["id"]] = (task, start_task(task, args.direct))
             if args.once:
+                started = True
+
+            for task_id, (task, process) in list(running.items()):
+                returncode = process.poll()
+                if returncode is not None:
+                    finish_task(task, returncode)
+                    del running[task_id]
+
+            if args.once and not running:
                 return
-            continue
-        if args.once:
-            return
-        time.sleep(args.poll_interval)
+            time.sleep(min(args.poll_interval, 0.1) if running else args.poll_interval)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -328,6 +363,7 @@ def parser() -> argparse.ArgumentParser:
     worker_parser.add_argument("--once", action="store_true")
     worker_parser.add_argument("--direct", action="store_true", help="run without systemd")
     worker_parser.add_argument("--poll-interval", type=float, default=5)
+    worker_parser.add_argument("--concurrency-factor", type=float, default=1.0)
     worker_parser.set_defaults(func=worker)
     return root
 

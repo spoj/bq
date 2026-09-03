@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import bq
 
@@ -42,6 +42,12 @@ class BqTest(unittest.TestCase):
         self.assertEqual(credits, 4_000_000)
         self.assertEqual(spent, 1_500_000)
 
+    def test_concurrency_limit_scales_with_balance(self):
+        self.assertEqual(bq.concurrency_limit(0, 1), 0)
+        self.assertEqual(bq.concurrency_limit(1_000_000, 1), 1)
+        self.assertEqual(bq.concurrency_limit(4_000_000, 1), 2)
+        self.assertEqual(bq.concurrency_limit(25_000_000, 0.5), 2)
+
     def test_claim_is_fifo_and_requires_positive_balance(self):
         self.configure(rate="1", initial="1")
         self.add(["first"])
@@ -58,19 +64,39 @@ class BqTest(unittest.TestCase):
             self.assertIsNone(bq.claim())
 
     def test_worker_waits_when_budget_is_not_configured(self):
-        args = argparse.Namespace(once=True, direct=True, poll_interval=0)
+        args = argparse.Namespace(
+            once=True, direct=True, poll_interval=0, concurrency_factor=1
+        )
         bq.worker(args)
 
     def test_direct_worker_records_success(self):
         self.configure()
         self.add()
-        args = argparse.Namespace(once=True, direct=True, poll_interval=0)
+        args = argparse.Namespace(
+            once=True, direct=True, poll_interval=0, concurrency_factor=1
+        )
         with patch("time.time", return_value=1001):
             bq.worker(args)
         with bq.connect() as db:
             task = bq.get_task(db, 1)
         self.assertEqual(task["status"], "succeeded")
         self.assertEqual(task["exit_code"], 0)
+
+    def test_worker_starts_tasks_up_to_the_concurrency_limit(self):
+        self.configure(rate="4", initial="4")
+        self.add(["first"])
+        with patch("time.time", return_value=1001), patch("builtins.print"):
+            bq.add(argparse.Namespace(cwd=self.temp.name, command=["second"]))
+        process = Mock()
+        process.poll.return_value = None
+        args = argparse.Namespace(
+            once=False, direct=True, poll_interval=0, concurrency_factor=1
+        )
+        with patch("bq.start_task", return_value=process) as start, patch(
+            "bq.time.sleep", side_effect=RuntimeError
+        ), self.assertRaises(RuntimeError):
+            bq.worker(args)
+        self.assertEqual(start.call_count, 2)
 
     def test_retry_requeues_failed_task(self):
         self.configure()

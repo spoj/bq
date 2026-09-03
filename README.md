@@ -28,7 +28,7 @@ bq show 1
 bq worker
 ```
 
-The worker runs one command at a time as a transient systemd user service. Inspect and control a running task with standard tools:
+The worker runs commands concurrently based on the available balance. By default, its slot limit is `max(1, floor(sqrt(balance)))` for a positive balance; set the scale with `--concurrency-factor`. Each command runs as a transient systemd user service. Inspect and control a running task with standard tools:
 
 ```bash
 journalctl --user -u bq-task-1
@@ -52,6 +52,7 @@ bq retry 1
 bq budget set 5 --initial 10
 bq worker --once
 bq worker --direct       # bypass systemd-run
+bq worker --concurrency-factor 0.5
 ```
 
 `budget set` starts a new accounting epoch. The initial balance defaults to one hour of credit.
