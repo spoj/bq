@@ -86,10 +86,14 @@ def session_cost(manifest_path):
 
 
 def main():
+    executable = Path(__file__).resolve()
     if "BQ_TASK_ID" not in os.environ:
-        os.execvp("pi", ["pi", *sys.argv[1:]])
+        os.execvp(
+            "bq",
+            ["bq", "add", "--cwd", os.getcwd(), "--", str(executable), *sys.argv[1:]],
+        )
 
-    extension = Path(__file__).with_name("pi-session.ts").resolve()
+    extension = executable.with_name("pi-session.ts")
     with tempfile.NamedTemporaryFile() as manifest:
         env = os.environ | {"BQ_PI_MANIFEST": manifest.name}
         result = subprocess.run(["pi", "--extension", extension, *sys.argv[1:]], env=env)
