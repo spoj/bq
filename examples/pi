@@ -1,4 +1,103 @@
-#!/bin/sh
+#!/usr/bin/env python3
 
-extension="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/pi.ts"
-exec pi --extension "$extension" "$@"
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from decimal import Decimal
+from pathlib import Path
+
+DELEGATED_TASK = "<delegated-task>"
+
+
+def read_entries(path):
+    with open(path) as file:
+        return [json.loads(line) for line in file if line.strip()][1:]
+
+
+def child_paths(entries):
+    paths = []
+    for entry in entries:
+        if entry.get("type") == "message":
+            message = entry["message"]
+            if message.get("role") == "toolResult" and message.get("toolName") == "Fork":
+                paths.append(message.get("details", {}).get("transcriptPath"))
+        elif entry.get("type") == "custom_message" and entry.get("customType") == "pi-tiny-fork":
+            paths.append(entry.get("details", {}).get("transcriptPath"))
+    return [path for path in paths if path]
+
+
+def usage(entry):
+    if entry.get("type") == "message":
+        message = entry["message"]
+        if message.get("role") in ("assistant", "toolResult"):
+            return message.get("usage")
+    elif entry.get("type") in ("compaction", "branch_summary"):
+        return entry.get("usage")
+    return None
+
+
+def delegated_task(entry):
+    if entry.get("type") != "message" or entry["message"].get("role") != "user":
+        return False
+    content = entry["message"].get("content", "")
+    if isinstance(content, list):
+        content = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+    return DELEGATED_TASK in content
+
+
+def session_cost(manifest_path):
+    starts = {}
+    with open(manifest_path) as file:
+        for line in file:
+            event = json.loads(line)
+            starts.setdefault(event["path"], set(event["entryIds"]))
+
+    seen_entries = set()
+    total = Decimal()
+    pending = [(path, starts[path]) for path in starts]
+    seen_sessions = set()
+
+    while pending:
+        path, baseline = pending.pop()
+        if path in seen_sessions or not Path(path).is_file():
+            continue
+        seen_sessions.add(path)
+        entries = read_entries(path)
+        for child in child_paths(entries):
+            pending.append((child, None))
+
+        if baseline is None:
+            marker = next((i for i, entry in enumerate(entries) if delegated_task(entry)), None)
+            if marker is None:
+                continue
+            candidates = entries[marker + 1 :]
+        else:
+            candidates = (entry for entry in entries if entry.get("id") not in baseline)
+
+        for entry in candidates:
+            entry_usage = usage(entry)
+            key = (entry.get("id"), entry.get("timestamp"))
+            if entry_usage and key not in seen_entries:
+                seen_entries.add(key)
+                total += Decimal(str(entry_usage["cost"]["total"]))
+    return total
+
+
+def main():
+    if "BQ_TASK_ID" not in os.environ:
+        os.execvp("pi", ["pi", *sys.argv[1:]])
+
+    extension = Path(__file__).with_name("pi-session.ts").resolve()
+    with tempfile.NamedTemporaryFile() as manifest:
+        env = os.environ | {"BQ_PI_MANIFEST": manifest.name}
+        result = subprocess.run(["pi", "--extension", extension, *sys.argv[1:]], env=env)
+        amount = session_cost(manifest.name)
+        if amount:
+            subprocess.run(["bq", "charge", os.environ["BQ_TASK_ID"], format(amount, "f")], check=True)
+        return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
