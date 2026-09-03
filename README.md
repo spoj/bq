@@ -42,7 +42,7 @@ bq charge 1 1.37
 bq budget
 ```
 
-The child command receives `BQ_TASK_ID` and `BQ_DB`, so an external wrapper can report its own cost. Costs are decimal credits; they do not have to represent dollars.
+The child command receives `BQ_TASK_ID` and `BQ_DB`, so an external wrapper can report its own cost. Costs are decimal credits; they do not have to represent dollars. See [`examples/`](examples/) for agent wrappers.
 
 Other operations:
 

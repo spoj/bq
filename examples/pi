@@ -1,0 +1,4 @@
+#!/bin/sh
+
+extension="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/pi.ts"
+exec pi --extension "$extension" "$@"
