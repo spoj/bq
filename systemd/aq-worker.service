@@ -1,0 +1,10 @@
+[Unit]
+Description=aq command queue worker
+
+[Service]
+ExecStart=%h/.local/bin/aq worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

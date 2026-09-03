@@ -1,0 +1,10 @@
+[Unit]
+Description=Budget-aware command queue
+
+[Service]
+ExecStart=%h/.local/bin/aq worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
