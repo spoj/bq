@@ -2,7 +2,7 @@
 Description=Budget-aware command queue
 
 [Service]
-ExecStart=%h/.local/bin/aq worker
+ExecStart=%h/.local/bin/bq worker
 Restart=always
 RestartSec=5
 

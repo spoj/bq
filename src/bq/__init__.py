@@ -34,10 +34,10 @@ CREATE TABLE IF NOT EXISTS settings (
 
 
 def db_path() -> Path:
-    if path := os.environ.get("AQ_DB"):
+    if path := os.environ.get("BQ_DB"):
         return Path(path)
     state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-    return state / "aq/aq.db"
+    return state / "bq/bq.db"
 
 
 def connect() -> sqlite3.Connection:
@@ -70,7 +70,7 @@ def balance(db: sqlite3.Connection, now: int | None = None) -> tuple[int, int, i
     rate = setting(db, "hourly_credit")
     initial = setting(db, "initial_balance")
     if epoch is None or rate is None or initial is None:
-        raise SystemExit("budget is not configured; run: aq budget set RATE")
+        raise SystemExit("budget is not configured; run: bq budget set RATE")
     now = int(time.time()) if now is None else now
     credits = max(0, (now - epoch) // 3600) * rate
     spent = db.execute(
@@ -151,7 +151,7 @@ def show(args: argparse.Namespace) -> None:
     fields = dict(row)
     fields["argv"] = json.loads(fields["argv"])
     fields["charged"] = money(charged)
-    fields["unit"] = f"aq-task-{args.task_id}.service"
+    fields["unit"] = f"bq-task-{args.task_id}.service"
     print(json.dumps(fields, indent=2))
 
 
@@ -166,7 +166,7 @@ def cancel(args: argparse.Namespace) -> None:
         )
     if row["status"] == "running":
         subprocess.run(
-            ["systemctl", "--user", "stop", f"aq-task-{args.task_id}.service"],
+            ["systemctl", "--user", "stop", f"bq-task-{args.task_id}.service"],
             check=False,
         )
 
@@ -228,7 +228,7 @@ def recover_running() -> None:
         rows = db.execute("SELECT id FROM tasks WHERE status = 'running'").fetchall()
         for row in rows:
             subprocess.run(
-                ["systemctl", "--user", "stop", f"aq-task-{row['id']}.service"],
+                ["systemctl", "--user", "stop", f"bq-task-{row['id']}.service"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -243,8 +243,8 @@ def recover_running() -> None:
 def run_task(task: sqlite3.Row, direct: bool = False) -> None:
     argv = json.loads(task["argv"])
     env = os.environ.copy()
-    env["AQ_TASK_ID"] = str(task["id"])
-    env["AQ_DB"] = str(db_path())
+    env["BQ_TASK_ID"] = str(task["id"])
+    env["BQ_DB"] = str(db_path())
     if direct:
         result = subprocess.run(argv, cwd=task["cwd"], env=env, check=False)
     else:
@@ -253,10 +253,10 @@ def run_task(task: sqlite3.Row, direct: bool = False) -> None:
             "--user",
             "--wait",
             "--quiet",
-            f"--unit=aq-task-{task['id']}",
+            f"--unit=bq-task-{task['id']}",
             f"--working-directory={task['cwd']}",
-            f"--setenv=AQ_TASK_ID={task['id']}",
-            f"--setenv=AQ_DB={db_path()}",
+            f"--setenv=BQ_TASK_ID={task['id']}",
+            f"--setenv=BQ_DB={db_path()}",
             "--",
             *argv,
         ]
@@ -286,7 +286,7 @@ def worker(args: argparse.Namespace) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="aq", description="Budget-aware command queue")
+    root = argparse.ArgumentParser(prog="bq", description="Budget-aware command queue")
     commands = root.add_subparsers(dest="subcommand", required=True)
 
     add_parser = commands.add_parser("add", help="enqueue a command")
