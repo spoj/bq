@@ -34,7 +34,7 @@ class AqTest(unittest.TestCase):
     def test_budget_accrues_hourly_and_subtracts_charges(self):
         self.configure(rate="2", initial="1")
         task_id = self.add()
-        with patch("time.time", return_value=1000):
+        with patch("time.time", return_value=1000), patch("builtins.print"):
             aq.charge(argparse.Namespace(task_id=task_id, amount="1.5"))
         with aq.connect() as db:
             current, credits, spent = aq.balance(db, now=1000 + 2 * 3600 + 10)
