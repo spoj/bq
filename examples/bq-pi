@@ -90,7 +90,17 @@ def main():
     if "BQ_TASK_ID" not in os.environ:
         os.execvp(
             "bq",
-            ["bq", "add", "--cwd", os.getcwd(), "--", str(executable), *sys.argv[1:]],
+            [
+                "bq",
+                "add",
+                "--cwd",
+                os.getcwd(),
+                "--",
+                "/usr/bin/env",
+                f"PATH={os.environ['PATH']}",
+                str(executable),
+                *sys.argv[1:],
+            ],
         )
 
     extension = executable.with_name("pi-session.ts")

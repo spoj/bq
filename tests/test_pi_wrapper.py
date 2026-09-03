@@ -28,7 +28,7 @@ def write_session(path, entries):
 class PiWrapperTest(unittest.TestCase):
     def test_invocation_enqueues_itself_in_the_current_directory(self):
         with (
-            patch.dict("os.environ", {}, clear=True),
+            patch.dict("os.environ", {"PATH": "/bin"}, clear=True),
             patch("os.getcwd", return_value="/work"),
             patch("sys.argv", ["bq-pi", "-p", "fix it"]),
             patch("os.execvp", side_effect=SystemExit) as execvp,
@@ -38,7 +38,18 @@ class PiWrapperTest(unittest.TestCase):
 
         execvp.assert_called_once_with(
             "bq",
-            ["bq", "add", "--cwd", "/work", "--", "/work/examples/bq-pi", "-p", "fix it"],
+            [
+                "bq",
+                "add",
+                "--cwd",
+                "/work",
+                "--",
+                "/usr/bin/env",
+                "PATH=/bin",
+                "/work/examples/bq-pi",
+                "-p",
+                "fix it",
+            ],
         )
 
     def test_cost_follows_forks_without_history_or_unrelated_sessions(self):
