@@ -26,31 +26,21 @@ def write_session(path, entries):
 
 
 class PiWrapperTest(unittest.TestCase):
-    def test_invocation_enqueues_itself_in_the_current_directory(self):
+    def test_invocation_runs_pi_and_charges_the_task(self):
+        pi_result = unittest.mock.Mock(returncode=7)
         with (
-            patch.dict("os.environ", {"PATH": "/bin"}, clear=True),
-            patch("os.getcwd", return_value="/work"),
+            patch.dict("os.environ", {"BQ_TASK_ID": "12"}, clear=True),
             patch("sys.argv", ["bq-pi", "-p", "fix it"]),
-            patch("os.execvp", side_effect=SystemExit) as execvp,
+            patch.object(pi_wrapper, "session_cost", return_value=Decimal("1.25")),
+            patch("subprocess.run", side_effect=[pi_result, unittest.mock.Mock()]) as run,
         ):
-            with self.assertRaises(SystemExit):
-                pi_wrapper.main()
+            self.assertEqual(pi_wrapper.main(), 7)
 
-        execvp.assert_called_once_with(
-            "bq",
-            [
-                "bq",
-                "add",
-                "--cwd",
-                "/work",
-                "--",
-                "/usr/bin/env",
-                "PATH=/bin",
-                "/work/examples/bq-pi",
-                "-p",
-                "fix it",
-            ],
-        )
+        pi_command = run.call_args_list[0]
+        self.assertEqual(pi_command.args[0][:2], ["pi", "--extension"])
+        self.assertEqual(pi_command.args[0][3:], ["-p", "fix it"])
+        self.assertIn("BQ_PI_MANIFEST", pi_command.kwargs["env"])
+        run.assert_any_call(["bq", "charge", "12", "1.25"], check=True)
 
     def test_cost_follows_forks_without_history_or_unrelated_sessions(self):
         with tempfile.TemporaryDirectory() as directory:

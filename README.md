@@ -20,7 +20,7 @@ The database defaults to `~/.local/state/bq/bq.db`. Set `BQ_DB` to use another p
 ## Use
 
 ```bash
-bq add --cwd ~/src/app -- pi -p "Fix the failing tests"
+bq add --cwd ~/src/app -- bq-pi -p "Fix the failing tests"
 bq add --cwd ~/src/app -- cc -p "Review the API"
 bq list
 bq show 1
