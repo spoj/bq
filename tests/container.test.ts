@@ -9,6 +9,7 @@ import {
   inspectContainer,
   startAgent,
   podmanArgs,
+  podmanEnv,
 } from "../src/container.ts";
 
 const config = {
@@ -45,6 +46,7 @@ test("agent and check commands use isolated mounts and explicit policy", () => {
   ]);
   assert.ok(agent.includes("--userns=keep-id"));
   assert.ok(agent.includes("--cap-drop=all"));
+  assert.ok(agent.includes("--http-proxy=false"));
   assert.ok(agent.includes("--security-opt=no-new-privileges"));
   assert.deepEqual(agent.slice(-2), ["--", "Fix the tests"]);
   assert.equal(agent[indexOf(agent, "--env") + 1], "HOME=/pi");
@@ -60,6 +62,18 @@ test("agent and check commands use isolated mounts and explicit policy", () => {
     config,
   });
   assert.deepEqual(check.slice(-3), ["/bin/sh", "-lc", "npm test"]);
+});
+
+test("Podman does not inherit host proxy settings", () => {
+  const previous = process.env.HTTPS_PROXY;
+  process.env.HTTPS_PROXY = "http://host-only.invalid:8888";
+  try {
+    assert.equal(podmanEnv().HTTPS_PROXY, undefined);
+    assert.equal(process.env.HTTPS_PROXY, "http://host-only.invalid:8888");
+  } finally {
+    if (previous === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = previous;
+  }
 });
 
 test("agent launch returns before the foreground container exits and copies credentials once", async () => {

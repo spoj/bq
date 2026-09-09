@@ -79,7 +79,8 @@ Each task copies `auth.json` and `models.json` from the selected Pi configuratio
 directory once. Its private copies and session persist across resumptions. Global
 Pi extensions, skills, and packages are not loaded; the container uses the bundled
 Pi and the project's context files. Environment variables are passed only when
-listed with `--env`.
+listed with `--env`. Automatic proxy forwarding is disabled for builds and task
+containers; bq removes inherited host proxy settings from its Podman processes.
 
 The project must be a normal, non-bare Git repository and the upstream branch
 must already exist locally. Re-running `init` updates the image, model, checks,
@@ -220,6 +221,16 @@ the user service definition.
 npm test
 npm run build
 ```
+
+After building the agent image, run the real container smoke test:
+
+```sh
+npm run test:podman
+```
+
+It runs the real Pi against a local deterministic test API, so no provider
+credentials or paid model calls are needed. It checks session continuation,
+local-file mounts, Git integration, container recovery, and cancellation.
 
 The implementation intentionally uses Node's built-in TypeScript stripping and
 SQLite APIs; there are no runtime or development package dependencies.

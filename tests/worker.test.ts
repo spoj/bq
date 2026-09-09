@@ -60,7 +60,9 @@ async function main() {
     code=result.status ?? 1;
   } else {
     fs.appendFileSync(path.join(stateDir,'session.jsonl'), JSON.stringify({prompt})+'\\n');
-    if (!prompt.includes('no changes')) {
+    const apiError = prompt.includes('API failure');
+    console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:apiError?'error':'stop',errorMessage:apiError?'Connection error.':undefined}}));
+    if (!prompt.includes('no changes') && !apiError) {
       const upstream = prompt.match(/Also merge upstream revision ([0-9a-f]+)/);
       if (upstream) {
         try { git('merge','--no-edit',upstream[1]); } catch {
@@ -141,6 +143,15 @@ test('agent changes are committed, checked, integrated, and cleaned up', async t
   assert.equal(await readFile(join(project.source, 'shared.txt'), 'utf8'), 'initial\n');
   await assert.rejects(readFile(join(project.source, 'result.txt')));
   assert.ok((await readFile(join(task.stateDir, 'session.jsonl'), 'utf8')).includes('write a result'));
+});
+
+test('a pi API failure is blocked even if its process exits zero', async t => {
+  const { store, project, start } = await fixture(t);
+  const task = store.add(project.id, 'API failure');
+  start();
+  await until(() => ['done', 'blocked'].includes(store.task(task.id).status));
+  assert.equal(store.task(task.id).status, 'blocked');
+  assert.match(store.task(task.id).error!, /Connection error/);
 });
 
 test('dirty completion resumes the same task instead of claiming success', async t => {

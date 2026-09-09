@@ -15,7 +15,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "prepare": "npm run build",
-    "test": "node --test tests/*.test.ts"
+    "test": "node --test tests/*.test.ts",
+    "test:podman": "node --test tests/podman.smoke.ts"
   },
   "engines": {
     "node": ">=24.12"

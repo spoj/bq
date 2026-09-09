@@ -7,7 +7,7 @@ import {
   initializeProject, fetchUpstream, integrationHead, createWorkspace, prepareCandidate,
   prepareUpstream, publishCandidate, updateTaskIntegration, fetchUpstreamIntoWorkspace, git,
 } from './git.ts';
-import { startAgent, startCheck, inspectContainer, removeContainer, stopContainer, waitContainer } from './container.ts';
+import { startAgent, startCheck, inspectContainer, removeContainer, stopContainer, waitContainer, agentError } from './container.ts';
 
 export async function notify(stateDir: string): Promise<void> {
   await new Promise<void>(resolve => {
@@ -149,6 +149,9 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
         }
         if (!container || !['exited', 'stopped'].includes(container.status)) {
           completion.error ??= 'Container did not finish; retry the task to continue';
+        }
+        if (!completion.error && run.kind === 'agent' && container!.exitCode === 0) {
+          completion.error = await agentError(task.stateDir, run.name) ?? undefined;
         }
         const exitCode = completion.error ? -1 : container!.exitCode;
         store.finishRun(run, exitCode, completion.error ?? null, container?.startedAt, container?.finishedAt);

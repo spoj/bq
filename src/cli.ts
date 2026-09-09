@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { Store } from "./store.ts";
 import { notify, work } from "./worker.ts";
-import { podmanArgs } from "./container.ts";
+import { podmanArgs, podmanEnv } from "./container.ts";
 
 const program = fileURLToPath(import.meta.url);
 
@@ -189,11 +189,11 @@ function build(store: Store, args: string[]): void {
   const parsed = options(args, { tag: { type: "string", default: "bq-agent:local" } });
   noPositionals(parsed, "build");
   const root = fileURLToPath(new URL("../", import.meta.url));
-  execFileSync(podmanCommand(), [...podmanArgs(store.dataDir), "build", "-f", `${root}Containerfile`, "-t", String(parsed.values.tag), root], { stdio: "inherit" });
+  execFileSync(podmanCommand(), [...podmanArgs(store.dataDir), "build", "--http-proxy=false", "-f", `${root}Containerfile`, "-t", String(parsed.values.tag), root], { env: podmanEnv(), stdio: "inherit" });
 }
 
 function podman(store: Store, args: string[]): void {
-  execFileSync(podmanCommand(), [...podmanArgs(store.dataDir), ...args], { stdio: "inherit" });
+  execFileSync(podmanCommand(), [...podmanArgs(store.dataDir), ...args], { env: podmanEnv(), stdio: "inherit" });
 }
 
 function runProcess(command: string, args: string[]): Promise<void> {

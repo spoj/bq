@@ -1,4 +1,5 @@
-import { closeSync, existsSync, openSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { cp, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -38,6 +39,14 @@ const copiedPiFiles = ["auth.json", "models.json"];
 
 function podman(): string {
   return process.env.BQ_PODMAN || "podman";
+}
+
+export function podmanEnv(inherit: string[] = []): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^(https?|all|no)_proxy$/i.test(name) && !inherit.includes(name)) delete env[name];
+  }
+  return env;
 }
 
 export function podmanArgs(dataDir: string): string[] {
@@ -87,6 +96,7 @@ function commonRunArgs(spec: { name: string; workspace: string; stateDir: string
     "--name", spec.name,
     "--pull=never",
     "--sig-proxy=false",
+    "--http-proxy=false",
     "--userns=keep-id",
     "--cap-drop=all",
     "--security-opt=no-new-privileges",
@@ -142,7 +152,7 @@ export function buildCheckArgs(spec: CheckSpec): string[] {
 function runProcess(dataDir: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   args = [...podmanArgs(dataDir), ...args];
   return new Promise((resolveProcess) => {
-    const child = spawn(podman(), args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(podman(), args, { env: podmanEnv(), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout?.setEncoding("utf8");
@@ -181,10 +191,11 @@ function logFiles(stateDir: string, name: string): [number, number] {
   return [openSync(output, "a"), openSync(error, "a")];
 }
 
-async function launchContainer(args: string[], stateDir: string, name: string): Promise<{ done: Promise<{ exitCode: number; error?: string }> }> {
+async function launchContainer(args: string[], stateDir: string, name: string, inherit: string[]): Promise<{ done: Promise<{ exitCode: number; error?: string }> }> {
   const [stdout, stderr] = logFiles(stateDir, name);
   const child = spawn(podman(), args, {
     detached: true,
+    env: podmanEnv(inherit),
     stdio: ["ignore", stdout, stderr],
   });
   closeSync(stdout);
@@ -211,6 +222,7 @@ export function waitContainer(name: string, dataDir: string): Promise<{ exitCode
   return new Promise((resolveWait) => {
     const child = spawn(podman(), [...podmanArgs(dataDir), "wait", name], {
       detached: true,
+      env: podmanEnv(),
       stdio: "ignore",
     });
     child.unref();
@@ -236,7 +248,7 @@ export function waitContainer(name: string, dataDir: string): Promise<{ exitCode
 async function start(spec: RunSpec | CheckSpec, args: string[]): Promise<RunningContainer> {
   await mkdir(absolute(spec.stateDir), { recursive: true });
   await copyPiConfig(spec.config, spec.stateDir);
-  const launched = await launchContainer(args, spec.stateDir, spec.name);
+  const launched = await launchContainer(args, spec.stateDir, spec.name, spec.config.env);
   const done = launched.done;
   return {
     name: spec.name,
@@ -247,6 +259,21 @@ async function start(spec: RunSpec | CheckSpec, args: string[]): Promise<Running
 
 export function startAgent(spec: RunSpec): Promise<RunningContainer> {
   return start(spec, buildAgentArgs(spec));
+}
+
+export async function agentError(stateDir: string, name: string): Promise<string | null> {
+  let message: { stopReason: string; errorMessage?: string } | undefined;
+  const safeName = name.replace(/[^A-Za-z0-9_.-]/g, "_");
+  const lines = createInterface({ input: createReadStream(join(absolute(stateDir), `run-${safeName}.stdout.log`)), crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line) continue;
+    const event = JSON.parse(line);
+    if (event.type === "message_end" && event.message.role === "assistant") message = event.message;
+  }
+  if (!message || !["stop", "length"].includes(message.stopReason)) {
+    return message?.errorMessage ?? "pi exited without a completed assistant response";
+  }
+  return null;
 }
 
 export function startCheck(spec: CheckSpec): Promise<RunningContainer> {
@@ -260,9 +287,9 @@ function parseTimestamp(value: unknown): number | null {
 }
 
 export async function inspectContainer(name: string, dataDir: string): Promise<ContainerInspection | null> {
-  const result = await runProcess(dataDir, ["inspect", name]);
+  const result = await runProcess(dataDir, ["inspect", "--type", "container", name]);
   if (result.code !== 0) {
-    const missing = /no such container|does not exist|not found/i.test(result.stderr);
+    const missing = /no such (?:container|object)|does not exist|not found/i.test(result.stderr);
     if (missing) return null;
     throw new Error(`podman inspect ${name} failed (${result.code}): ${result.stderr.trim()}`);
   }
