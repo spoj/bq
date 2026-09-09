@@ -2,6 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { cp, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -36,6 +37,7 @@ export interface ContainerInspection {
 }
 
 const copiedPiFiles = ["auth.json", "models.json"];
+export const DEFAULT_IMAGE = "bq-agent:local";
 
 function podman(): string {
   return process.env.BQ_PODMAN || "podman";
@@ -149,6 +151,14 @@ export function buildCheckArgs(spec: CheckSpec): string[] {
   ];
 }
 
+function runInherited(args: string[]): Promise<number> {
+  return new Promise((resolveCode, reject) => {
+    const child = spawn(podman(), args, { env: podmanEnv(), stdio: "inherit" });
+    child.once("error", reject);
+    child.once("close", code => resolveCode(code ?? -1));
+  });
+}
+
 function runProcess(dataDir: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   args = [...podmanArgs(dataDir), ...args];
   return new Promise((resolveProcess) => {
@@ -170,6 +180,32 @@ async function requireProcess(dataDir: string, args: string[]): Promise<string> 
     throw new Error(`podman ${args.join(" ")} failed (${result.code}): ${result.stderr.trim()}`);
   }
   return result.stdout.trim();
+}
+
+const bundledRoot = fileURLToPath(new URL("../", import.meta.url));
+
+export async function buildImage(dataDir: string, image = DEFAULT_IMAGE): Promise<void> {
+  const args = [
+    ...podmanArgs(dataDir),
+    "build",
+    "--http-proxy=false",
+    "-f", join(bundledRoot, "Containerfile"),
+    "-t", image,
+    bundledRoot,
+  ];
+  const code = await runInherited(args);
+  if (code !== 0) throw new Error(`podman image build failed (exit ${code})`);
+}
+
+export async function ensureImage(dataDir: string, image: string): Promise<void> {
+  const result = await runProcess(dataDir, ["image", "exists", image]);
+  if (result.code === 0) return;
+  if (result.code !== 1) throw new Error(`podman image exists failed (${result.code}): ${result.stderr.trim()}`);
+  if (image !== DEFAULT_IMAGE) {
+    throw new Error(`Image ${image} is not available. Build it with: bq build --tag ${image}\nOr pull it with: bq podman pull ${image}`);
+  }
+  console.error(`bq: ${image} is missing; building it now...`);
+  await buildImage(dataDir, image);
 }
 
 async function copyPiConfig(config: ContainerConfig, stateDir: string): Promise<void> {

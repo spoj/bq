@@ -15,7 +15,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
 
 test('project registration updates config without changing upstream history', t => {
   const { store, project } = fixture(t);
-  assert.equal(store.projectFor('/project').id, project.id);
+  assert.equal(store.projectFor('/project')!.id, project.id);
   assert.throws(() => store.register({ ...project, branch: 'other' }), /different upstream/);
   assert.equal(store.register({ ...project, model: 'other/model' }).model, 'other/model');
 });
@@ -65,6 +65,16 @@ test('runtime debt and concurrency survive reopening', t => {
   assert.equal(reopened.account(start + 3_000_000).balance, 0);
   assert.equal(reopened.task(task.id).status, 'running');
   reopened.close();
+});
+
+test('defaults preserve unspecified settings and do not change registered projects', t => {
+  const { store, project } = fixture(t);
+  assert.deepEqual(store.defaults(), {});
+  assert.equal(store.projectFor('/not-registered'), undefined);
+  store.setDefaults({ model: 'new/model', thinking: 'high', checkCommand: 'npm test' });
+  store.setDefaults({ image: 'custom:local', checkCommand: null });
+  assert.deepEqual(store.defaults(), { model: 'new/model', thinking: 'high', image: 'custom:local' });
+  assert.equal(store.project(project.id).model, 'test/model');
 });
 
 test('invalid target is rejected; zero pauses admission', t => {

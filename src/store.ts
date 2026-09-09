@@ -53,7 +53,8 @@ export interface Run {
   error: string | null;
 }
 
-type Registration = Omit<Project, 'id' | 'integration' | 'syncRequested'>;
+export type ProjectSettings = Pick<Project, 'image' | 'model' | 'thinking' | 'checkCommand' | 'env' | 'piConfig' | 'maxRepairs'>;
+type Registration = ProjectSettings & Pick<Project, 'source' | 'branch'>;
 
 export class Store {
   readonly db: DatabaseSync;
@@ -90,6 +91,9 @@ export class Store {
         id INTEGER PRIMARY KEY, taskId INTEGER NOT NULL REFERENCES tasks(id), kind TEXT NOT NULL,
         name TEXT NOT NULL UNIQUE, startedAt INTEGER NOT NULL, finishedAt INTEGER, exitCode INTEGER, error TEXT
       );
+      CREATE TABLE IF NOT EXISTS defaults (
+        id INTEGER PRIMARY KEY CHECK(id = 1), data TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS scheduling (
         id INTEGER PRIMARY KEY CHECK(id = 1), target REAL NOT NULL, balance REAL NOT NULL,
         accountedAt INTEGER NOT NULL, totalUsage REAL NOT NULL
@@ -119,10 +123,19 @@ export class Store {
     return { ...row, env: JSON.parse(String(row.env)) } as unknown as Project;
   }
 
-  projectFor(source: string): Project {
+  projectFor(source: string): Project | undefined {
     const row = this.db.prepare('SELECT id FROM projects WHERE source=?').get(source);
-    if (!row) throw new Error('Project is not registered; run bq init first');
-    return this.project(Number(row.id));
+    return row ? this.project(Number(row.id)) : undefined;
+  }
+
+  defaults(): Partial<ProjectSettings> {
+    const row = this.db.prepare('SELECT data FROM defaults WHERE id=1').get();
+    return row ? JSON.parse(String(row.data)) : {};
+  }
+
+  setDefaults(settings: Partial<ProjectSettings>): void {
+    this.db.prepare(`INSERT INTO defaults VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data=json_patch(defaults.data, excluded.data)`)
+      .run(JSON.stringify(settings));
   }
 
   listProjects(): Project[] {

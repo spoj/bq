@@ -7,7 +7,7 @@ import {
   initializeProject, fetchUpstream, integrationHead, createWorkspace, prepareCandidate,
   prepareUpstream, publishCandidate, updateTaskIntegration, fetchUpstreamIntoWorkspace, git,
 } from './git.ts';
-import { startAgent, startCheck, inspectContainer, removeContainer, stopContainer, waitContainer, agentError } from './container.ts';
+import { startAgent, startCheck, inspectContainer, removeContainer, stopContainer, waitContainer, agentError, ensureImage } from './container.ts';
 
 export async function notify(stateDir: string): Promise<void> {
   await new Promise<void>(resolve => {
@@ -107,6 +107,10 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
   };
 
   const launch = async (task: Task, project: Project, kind: Run['kind']) => {
+    if (stopping) return;
+    await ensureImage(store.dataDir, project.image);
+    const allowance = store.account();
+    if (stopping || !canStart(allowance.target, allowance.balance, allowance.running)) return;
     const run = store.startRun(task, kind);
     await mkdir(task.stateDir, { recursive: true });
     try {

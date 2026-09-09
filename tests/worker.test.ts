@@ -22,6 +22,7 @@ const save = (name, state) => fs.writeFileSync(file(name), JSON.stringify(state)
 const pause = ms => new Promise(r => setTimeout(r, ms));
 async function main() {
   const op = args[0];
+  if (op === 'image' && args[1] === 'exists') return;
   if (op === 'inspect') {
     const name = args.at(-1);
     if (!fs.existsSync(file(name))) { console.error('no such container'); process.exitCode=1; return; }

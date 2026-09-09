@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -6,6 +6,9 @@ import assert from "node:assert/strict";
 import {
   buildAgentArgs,
   buildCheckArgs,
+  buildImage,
+  DEFAULT_IMAGE,
+  ensureImage,
   inspectContainer,
   startAgent,
   podmanArgs,
@@ -139,6 +142,109 @@ test("private podman storage is derived from bq data and isolated by project", a
   assert.notEqual(first[3], second[3]);
   assert.match(first[3], /\/bq\/[^/]+\/run$/);
   assert.match(first[5], /\/bq\/[^/]+\/tmp$/);
+});
+
+async function fakeImagePodman(root: string): Promise<{ command: string; state: string }> {
+  const command = join(root, "podman");
+  const state = join(root, "state");
+  await writeFile(command, `#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_IMAGE_STATE/all-args"
+while [ "$1" = "--root" ] || [ "$1" = "--runroot" ] || [ "$1" = "--tmpdir" ]; do shift 2; done
+if [ "$1" = image ] && [ "$2" = exists ]; then
+  if [ "$FAKE_IMAGE_INSPECT_FAIL" = 1 ]; then echo permission denied >&2; exit 125; fi
+  test -f "$FAKE_IMAGE_STATE/image" && exit 0
+  echo 'no such image' >&2
+  exit 1
+fi
+if [ "$1" = build ]; then
+  printf '%s\\n' "$@" > "$FAKE_IMAGE_STATE/args"
+  printf x >> "$FAKE_IMAGE_STATE/builds"
+  touch "$FAKE_IMAGE_STATE/image"
+  exit 0
+fi
+echo unexpected podman command: "$@" >&2
+exit 125
+`);
+  await chmod(command, 0o755);
+  await mkdir(state);
+  return { command, state };
+}
+
+test("ensureImage leaves an existing image alone", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bq-image-test-"));
+  const { command, state } = await fakeImagePodman(root);
+  const oldPodman = process.env.BQ_PODMAN;
+  const oldState = process.env.FAKE_IMAGE_STATE;
+  process.env.BQ_PODMAN = command;
+  process.env.FAKE_IMAGE_STATE = state;
+  await writeFile(join(state, "image"), "present");
+  try {
+    await ensureImage(join(root, "data"), DEFAULT_IMAGE);
+    assert.equal(await readFile(join(state, "builds"), "utf8").catch(() => ""), "");
+  } finally {
+    if (oldPodman === undefined) delete process.env.BQ_PODMAN; else process.env.BQ_PODMAN = oldPodman;
+    if (oldState === undefined) delete process.env.FAKE_IMAGE_STATE; else process.env.FAKE_IMAGE_STATE = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureImage builds the default image once and uses bq storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bq-image-test-"));
+  const { command, state } = await fakeImagePodman(root);
+  const oldPodman = process.env.BQ_PODMAN;
+  const oldState = process.env.FAKE_IMAGE_STATE;
+  process.env.BQ_PODMAN = command;
+  process.env.FAKE_IMAGE_STATE = state;
+  try {
+    await ensureImage(join(root, "data"), DEFAULT_IMAGE);
+    await ensureImage(join(root, "data"), DEFAULT_IMAGE);
+    assert.equal((await readFile(join(state, "builds"), "utf8")).length, 1);
+    const args = await readFile(join(state, "args"), "utf8");
+    assert.match(args, /build/);
+    assert.match(args, /--http-proxy=false/);
+    assert.match(await readFile(join(state, "all-args"), "utf8"), /--root/);
+    assert.match(args, /Containerfile/);
+  } finally {
+    if (oldPodman === undefined) delete process.env.BQ_PODMAN; else process.env.BQ_PODMAN = oldPodman;
+    if (oldState === undefined) delete process.env.FAKE_IMAGE_STATE; else process.env.FAKE_IMAGE_STATE = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureImage gives a pull/build hint for a missing custom image", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bq-image-test-"));
+  const { command, state } = await fakeImagePodman(root);
+  const oldPodman = process.env.BQ_PODMAN;
+  const oldState = process.env.FAKE_IMAGE_STATE;
+  process.env.BQ_PODMAN = command;
+  process.env.FAKE_IMAGE_STATE = state;
+  try {
+    await assert.rejects(ensureImage(join(root, "data"), "custom:latest"), /bq build --tag custom:latest.*bq podman pull custom:latest/s);
+    assert.equal(await readFile(join(state, "builds"), "utf8").catch(() => ""), "");
+  } finally {
+    if (oldPodman === undefined) delete process.env.BQ_PODMAN; else process.env.BQ_PODMAN = oldPodman;
+    if (oldState === undefined) delete process.env.FAKE_IMAGE_STATE; else process.env.FAKE_IMAGE_STATE = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureImage surfaces image inspection failures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bq-image-test-"));
+  const { command, state } = await fakeImagePodman(root);
+  const oldPodman = process.env.BQ_PODMAN;
+  const oldState = process.env.FAKE_IMAGE_STATE;
+  const oldFailure = process.env.FAKE_IMAGE_INSPECT_FAIL;
+  process.env.BQ_PODMAN = command;
+  process.env.FAKE_IMAGE_STATE = state;
+  process.env.FAKE_IMAGE_INSPECT_FAIL = "1";
+  try {
+    await assert.rejects(ensureImage(join(root, "data"), DEFAULT_IMAGE), /permission denied/);
+  } finally {
+    if (oldPodman === undefined) delete process.env.BQ_PODMAN; else process.env.BQ_PODMAN = oldPodman;
+    if (oldState === undefined) delete process.env.FAKE_IMAGE_STATE; else process.env.FAKE_IMAGE_STATE = oldState;
+    if (oldFailure === undefined) delete process.env.FAKE_IMAGE_INSPECT_FAIL; else process.env.FAKE_IMAGE_INSPECT_FAIL = oldFailure;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("inspection treats a missing container as absent", async () => {
