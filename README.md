@@ -28,9 +28,13 @@ bq build
 - Linux
 - Node.js 24.12 or newer
 - Git
-- Podman
+- Rootless Podman, with subordinate UID/GID ranges in `/etc/subuid` and `/etc/subgid`
 - GNU `cp` and `flock` (from the standard coreutils/util-linux packages)
 - Btrfs (recommended, for reflink-backed task workspaces)
+
+Check rootless setup with `bq podman info`. If it reports missing subordinate
+IDs, have an administrator allocate unused ranges to your user, then run
+`bq podman system migrate` before building the image.
 
 The bundled agent image contains Pi and its basic command-line dependencies.
 The worker uses Podman's `--pull=never`, so build the image locally (or pull it

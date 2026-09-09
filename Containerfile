@@ -1,4 +1,4 @@
-FROM node:24.12.0-bookworm-slim
+FROM docker.io/library/node:24.12.0-bookworm-slim
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates git bash coreutils ripgrep \
@@ -8,4 +8,4 @@ RUN apt-get update \
 
 WORKDIR /work
 
-ENTRYPOINT ["pi"]
+ENTRYPOINT []
