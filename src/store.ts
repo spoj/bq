@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { accrue } from './policy.ts';
 
@@ -26,7 +26,7 @@ export interface Task {
   kind: 'work' | 'upstream';
   prompt: string;
   nextPrompt: string | null;
-  status: 'queued' | 'running' | 'integrating' | 'checking' | 'blocked' | 'done' | 'canceled';
+  status: 'queued' | 'running' | 'integrating' | 'checking' | 'publishing' | 'blocked' | 'done' | 'canceled';
   workspace: string;
   stateDir: string;
   base: string | null;
@@ -61,10 +61,10 @@ export class Store {
   readonly stateDir: string;
 
   constructor(options: { dataDir?: string; stateDir?: string } = {}) {
-    this.dataDir = options.dataDir ?? process.env.BQ_DATA_HOME ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share'), 'bq');
-    this.stateDir = options.stateDir ?? process.env.BQ_STATE_HOME ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local/state'), 'bq');
-    mkdirSync(this.dataDir, { recursive: true });
-    mkdirSync(this.stateDir, { recursive: true });
+    this.dataDir = resolve(options.dataDir ?? process.env.BQ_DATA_HOME ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share'), 'bq'));
+    this.stateDir = resolve(options.stateDir ?? process.env.BQ_STATE_HOME ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local/state'), 'bq'));
+    mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(join(this.stateDir, 'queue.sqlite'));
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -156,9 +156,8 @@ export class Store {
   }
 
   cancel(id: number): void {
-    const task = this.task(id);
-    if (['done', 'canceled'].includes(task.status)) throw new Error(`Task ${id} is ${task.status}`);
-    this.updateTask(id, { status: 'canceled' });
+    const result = this.db.prepare("UPDATE tasks SET status='canceled',updatedAt=? WHERE id=? AND status NOT IN ('done','canceled','publishing')").run(Date.now(), id);
+    if (!result.changes) throw new Error(`Task ${id} is ${this.task(id).status}`);
   }
 
   retry(id: number): void {
@@ -206,8 +205,16 @@ export class Store {
   }
 
   finishRun(run: Run, exitCode: number, error: string | null, startedAt?: number | null, finishedAt?: number | null): void {
-    this.db.prepare('UPDATE runs SET startedAt=?,finishedAt=?,exitCode=?,error=? WHERE id=?')
-      .run(startedAt ?? run.startedAt, finishedAt ?? Date.now(), exitCode, error, run.id);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE runs SET startedAt=?,finishedAt=?,exitCode=?,error=? WHERE id=?')
+        .run(startedAt ?? run.startedAt, finishedAt ?? Date.now(), exitCode, error, run.id);
+      if (this.task(run.taskId).status !== 'canceled') this.updateTask(run.taskId, { status: 'integrating' });
+      this.db.exec('COMMIT');
+    } catch (failure) {
+      this.db.exec('ROLLBACK');
+      throw failure;
+    }
     this.account();
   }
 

@@ -35,6 +35,14 @@ test('task state persists; cancellation does not stop unrelated runs', t => {
   assert.equal(store.runs(task.id).length, 1);
 });
 
+test('cancellation cannot interrupt the final publication step', t => {
+  const { store, project } = fixture(t);
+  const task = store.add(project.id, 'Work');
+  store.updateTask(task.id, { status: 'publishing' });
+  assert.throws(() => store.cancel(task.id), /publishing/);
+  assert.equal(store.task(task.id).status, 'publishing');
+});
+
 test('upstream synchronization is deduplicated even when blocked', t => {
   const { store, project } = fixture(t);
   const sync = store.add(project.id, 'Resolve upstream', 'abc');
