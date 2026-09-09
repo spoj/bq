@@ -1,92 +1,221 @@
 # bq
 
-A budget-aware queue for CLI commands. `bq` credits an account at a fixed hourly rate, records costs after they are known, and starts one queued command whenever the balance is positive.
+`bq` is a Git-integrated queue for Pi coding agents. It runs each task in a
+Podman container, gives it a private copy-on-write workspace, and accepts its
+commits into a bq-owned `bq-integration` branch only after the harness checks
+them.
+
+The original repository is never modified by bq. The integration branch is an
+output that you can inspect and merge into your own branch when ready.
+
+## Requirements
+
+Install bq from a checkout before the first build. Either compile and run the
+local CLI directly:
+
+```sh
+npm run build
+./dist/cli.js build
+```
+
+or install the package under `~/.local` and use its `bq` executable:
+
+```sh
+npm install --global --prefix "$HOME/.local" .
+bq build
+```
+
+- Linux
+- Node.js 24.12 or newer
+- Git
+- Podman
+- GNU `cp` and `flock` (from the standard coreutils/util-linux packages)
+- Btrfs (recommended, for reflink-backed task workspaces)
+
+The bundled agent image contains Pi and its basic command-line dependencies.
+The worker uses Podman's `--pull=never`, so build the image locally (or pull it
+explicitly with `bq podman pull`) before queueing work:
+
+```sh
+bq build
+```
+
+`bq build` uses bq's private persistent Podman store, separate from your other
+Podman images. Inspect it with the same store using `bq podman ps`,
+`bq podman images`, or any other Podman arguments. The store is under
+`${XDG_DATA_HOME:-~/.local/share}/bq/podman/`; transient runtime files are
+under `${XDG_RUNTIME_DIR:-/run/user/$UID}/bq/`.
+
+The image tag defaults to `bq-agent:local`. Source files are TypeScript for
+development, but `npm run build` compiles the executable to `dist/`; the
+published/global package points at that JavaScript build because Node does not
+strip TypeScript inside installed packages.
+
+## Register a project
+
+```sh
+cd ~/project_a
+bq init . \
+  --branch main \
+  --image bq-agent:local \
+  --model anthropic/claude-sonnet-4-5 \
+  --check 'npm test'
+```
+
+`--model` is the model identifier passed to Pi. Other useful options are:
 
 ```text
-balance = initial balance + completed hours × hourly credit - charges
+--thinking medium       Pi reasoning level (default: medium)
+--env NAME               pass a named host environment variable to containers; repeatable
+--pi-config PATH         Pi configuration directory (default: ~/.pi/agent)
+--max-repairs N          automatic repair attempts (default: 3)
 ```
 
-Running work is allowed to finish after the balance becomes negative. New work waits until future credits make it positive again.
+Each task copies `auth.json` and `models.json` from the selected Pi configuration
+directory once. Its private copies and session persist across resumptions. Global
+Pi extensions, skills, and packages are not loaded; the container uses the bundled
+Pi and the project's context files. Environment variables are passed only when
+listed with `--env`.
 
-## Install
+The project must be a normal, non-bare Git repository and the upstream branch
+must already exist locally. Re-running `init` updates the image, model, checks,
+environment names, and repair limit; changing the registered branch is
+rejected.
 
-```bash
-uv tool install .
-bq budget set 5
-```
+## Queue and run work
 
-The database defaults to `~/.local/state/bq/bq.db`. Set `BQ_DB` to use another path.
-
-## Use
-
-```bash
-bq add --cwd ~/src/app -- bq-pi -p "Fix the failing tests"
-bq add --cwd ~/src/app -- cc -p "Review the API"
+```sh
+bq add --cwd ~/project_a 'Add a health endpoint and tests'
 bq list
-bq show 1
-
 bq worker
+bq show 1
 ```
 
-The worker runs commands concurrently based on the available balance. By default, its slot limit is `max(1, floor(sqrt(balance)))` for a positive balance; set the scale with `--concurrency-factor`. Each command runs as a transient systemd user service. Inspect and control a running task with standard tools:
+`bq worker` is normally run as a user service. A single worker is enforced by
+an OS lock, so starting a second worker is harmless. The worker starts as many
+containers as the runtime scheduler allows and waits for them to finish.
 
-```bash
-journalctl --user -u bq-task-1
-systemctl --user stop bq-task-1
-```
+Cancel or retry a task:
 
-Record cost whenever it becomes available:
-
-```bash
-bq charge 1 1.37
-bq budget
-```
-
-The child command receives `BQ_TASK_ID` and `BQ_DB`, so an external wrapper can report its own cost. Costs are decimal credits; they do not have to represent dollars. See [`examples/`](examples/) for agent wrappers.
-
-Other operations:
-
-```bash
+```sh
 bq cancel 1
 bq retry 1
-bq budget set 5 --initial 10
-bq worker --once
-bq worker --direct       # bypass systemd-run
-bq worker --concurrency-factor 0.5
 ```
 
-`budget set` starts a new accounting epoch. The initial balance defaults to one hour of credit.
+A task is complete only when its commits have been accepted into
+`bq-integration`. A clean agent exit is not by itself completion. If an agent
+leaves uncommitted changes, if integration conflicts, or if the configured
+checks fail, bq wakes Pi again with the concrete repair request. Failed repair
+loops eventually become `blocked`; `retry` resumes their saved workspace and session.
+Cancellation is refused once the short final publication step has begun. Stopping
+the worker leaves running containers intact; restarting it recovers them.
 
-## Deploy on this machine
+## Average concurrency
 
-After committing and pushing:
+The scheduler targets average simultaneous container concurrency, not a money
+balance. Fractions are valid:
 
-```bash
+```sh
+bq concurrency 0.2
+bq concurrency 1.5
+bq concurrency 3.14
+bq concurrency
+```
+
+Usage is measured internally in container milliseconds; `bq concurrency`
+reports the current balance in seconds. Idle time accrues bounded credit; the
+bound is one minute of target concurrency, so a machine cannot accumulate an
+unlimited burst after sitting idle. Running containers are never preempted.
+The instantaneous default ceiling is `ceil(target)`, and repair, conflict
+resolution, and checks consume the same runtime allowance. Set the target to
+zero to pause new starts without stopping running work:
+
+```sh
+bq concurrency 0
+bq concurrency 0.2
+```
+
+This is a long-run average: for example, target `0.2` permits about ten minutes
+of work followed by about forty minutes of repayment when there is one task
+running.
+
+## Git and local files
+
+For each registered repository bq keeps an integration clone under:
+
+```text
+${XDG_DATA_HOME:-~/.local/share}/bq/integrations/
+```
+
+It creates and owns the local `bq-integration` branch there. Each task gets a
+private workspace made from the integration snapshot. Btrfs reflinks make
+unchanged file contents share storage; when reflinks are unavailable bq falls
+back to regular copies.
+
+Tracked files come from `bq-integration`. All untracked and ignored files in
+the original project are copied into a new task workspace, including `.env`,
+local credentials, dependencies, and caches. Copying is isolated: task edits
+cannot modify the original directory or another task. New tasks snapshot the
+current local files; resumed tasks keep their existing workspace.
+
+Uncommitted edits to tracked files in the original directory are deliberately
+not copied. Untracked and ignored files are copied as local environment inputs,
+but are not automatically integrated: ignored inputs cannot be committed by a
+task, while an untracked file can be explicitly committed if the task requires
+it. Copying is not an atomic filesystem snapshot, so avoid changing local files
+while a task is being created. Host dependencies are available to the task but
+may need to be rebuilt for the container image. The agent is trusted with any
+secrets present in those files.
+
+Agents work in parallel on independent task branches. The harness serializes
+acceptance into `bq-integration`, tests candidate merges in disposable Git
+checkouts, and never leaves the canonical integration clone conflicted. If the
+source branch changes, bq fetches it when a task starts or `bq sync` is run. A
+conflict creates a resolution task rather than damaging the integration branch.
+
+To consume the result manually:
+
+```sh
+cd ~/project_a
+git fetch /path/to/integration-clone bq-integration
+git merge FETCH_HEAD
+```
+
+The integration clone path is shown by `bq list` and in the `project` object
+printed by `bq show`.
+
+## Configuration and state
+
+By default:
+
+```text
+${XDG_DATA_HOME:-~/.local/share}/bq/       integration clones and workspaces
+${XDG_STATE_HOME:-~/.local/state}/bq/     queue.sqlite, logs, and locks
+```
+
+Use `BQ_DATA_HOME` and `BQ_STATE_HOME` to override those roots. The new queue
+uses `queue.sqlite`; it does not read the database from the old Python
+implementation.
+
+## Run continuously
+
+Install the local package and enable the user service yourself:
+
+```sh
 ./deploy-local.sh
-```
-
-This installs the pushed commit with `uv tool install`, copies and enables `bq-worker.service`, and restarts the worker. Follow it with:
-
-```bash
 journalctl --user -u bq-worker -f
 ```
 
-Environment variables needed by agents launched with `systemd-run` must be available to the systemd user manager or configured on the worker service. Agents using credentials stored in their home directory need no extra setup.
-
-## Isolation
-
-Isolation is deliberately not part of `bq`. Queue an isolation tool as the command:
-
-```bash
-bq add -- docker run --rm your-agent-image pi -p "Do the task"
-bq add -- bwrap ... opencode run "Do the task"
-```
-
-Systemd can provide basic resource controls by adding properties to the worker implementation or wrapping a command with `systemd-run`. Containers, worktrees, remote execution, and agent-specific behavior remain outside the queue.
+`deploy-local.sh` does not push, install a remote package, or enable anything
+until you run it. It installs the executable under `~/.local/bin` and updates
+the user service definition.
 
 ## Development
 
-```bash
-uv sync
-uv run python -m unittest discover -s tests -v
+```sh
+npm test
+npm run build
 ```
+
+The implementation intentionally uses Node's built-in TypeScript stripping and
+SQLite APIs; there are no runtime or development package dependencies.

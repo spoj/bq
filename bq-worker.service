@@ -1,9 +1,12 @@
 [Unit]
-Description=Budget-aware command queue
+Description=bq agent worker
+After=network-online.target
 
 [Service]
+Type=simple
+KillMode=process
 ExecStart=%h/.local/bin/bq worker
-Restart=always
+Restart=on-failure
 RestartSec=5
 
 [Install]

@@ -1,0 +1,23 @@
+{
+  "name": "bq",
+  "version": "0.1.0",
+  "description": "A Git-integrated queue for Podman coding agents",
+  "type": "module",
+  "bin": {
+    "bq": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "Containerfile",
+    ".containerignore",
+    "bq-worker.service"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "npm run build",
+    "test": "node --test tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=24.12"
+  }
+}
