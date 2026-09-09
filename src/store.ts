@@ -144,12 +144,19 @@ export class Store {
 
   add(projectId: number, prompt: string, upstreamOid: string | null = null): Task {
     const now = Date.now();
-    const row = this.db.prepare('INSERT INTO tasks (projectId,kind,prompt,status,upstreamOid,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?)')
-      .run(projectId, upstreamOid ? 'upstream' : 'work', prompt, upstreamOid ? 'integrating' : 'queued', upstreamOid, now, now);
-    const id = Number(row.lastInsertRowid);
-    this.db.prepare('UPDATE tasks SET workspace=?,stateDir=? WHERE id=?')
-      .run(join(this.dataDir, 'tasks', String(id), 'work'), join(this.stateDir, 'tasks', String(id)), id);
-    return this.task(id);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('INSERT INTO tasks (projectId,kind,prompt,status,upstreamOid,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?)')
+        .run(projectId, upstreamOid ? 'upstream' : 'work', prompt, upstreamOid ? 'integrating' : 'queued', upstreamOid, now, now);
+      const id = Number(row.lastInsertRowid);
+      this.db.prepare('UPDATE tasks SET workspace=?,stateDir=? WHERE id=?')
+        .run(join(this.dataDir, 'tasks', String(id), 'work'), join(this.stateDir, 'tasks', String(id)), id);
+      this.db.exec('COMMIT');
+      return this.task(id);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   task(id: number): Task {

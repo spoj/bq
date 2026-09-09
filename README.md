@@ -1,236 +1,183 @@
 # bq
 
-`bq` is a Git-integrated queue for Pi coding agents. It runs each task in a
-Podman container, gives it a private copy-on-write workspace, and accepts its
-commits into a bq-owned `bq-integration` branch only after the harness checks
-them.
+`bq` queues Pi coding tasks and integrates their committed changes into a
+harness-owned Git branch. Work runs in rootless Podman containers. Your source
+checkout is never modified.
 
-The original repository is never modified by bq. The integration branch is an
-output that you can inspect and merge into your own branch when ready.
+## The short version
 
-## Requirements
+Start the runner from any directory, even before there are tasks:
 
-Install bq from a checkout before the first build. Either compile and run the
-local CLI directly:
+```sh
+bq run --concurrency 1.5
+```
+
+Then, from a Git repository in another terminal:
+
+```sh
+bq add "Fix the login bug"
+```
+
+`run` stays in the foreground and processes the shared queue across projects,
+waiting when it is empty. `add` queues and wakes the runner; it never starts
+one. Queuing tasks before starting `run` works too.
+
+```sh
+bq                         # compact status
+bq show 12                 # details, logs, or blocked reason
+bq cancel 12
+bq retry 12
+bq config                  # current project settings
+bq config --model anthropic/claude-sonnet-4-5 --check 'npm test'
+bq config --concurrency 1.5
+```
+
+Use `--json` on status-producing commands for machine-readable output. The
+normal output is intended for a terminal, not for scripts.
+
+`bq add` uses the current repository and branch. The first add automatically
+registers the project. The model is taken from bq's settings or Pi's configured
+`defaultProvider`, `defaultModel`, and `defaultThinkingLevel`. If no model is
+configured, an interactive add asks once; noninteractive use prints:
+
+```text
+No model configured. Run: bq config --global --model PROVIDER/MODEL
+```
+
+Set defaults for future projects with `--global`:
+
+```sh
+bq config --global --model anthropic/claude-sonnet-4-5
+bq config --global --thinking medium --image bq-agent:local
+```
+
+Project configuration is remembered independently of the branch currently
+checked out. `--cwd PATH` works with `add`, `config`, and `sync`.
+
+## Concurrency
+
+The target is average simultaneous container concurrency, not money. Fractions
+are valid:
+
+```sh
+bq config --concurrency 0.2
+bq run                    # optionally: bq run --concurrency 1.5
+```
+
+A target of `0` pauses new starts. Running containers are never preempted.
+The instantaneous ceiling is `ceil(target)`. Idle credit is bounded to one
+minute of target concurrency, and agents, checks, conflict resolution, and
+repairs all consume the same allowance.
+
+## Configuration
+
+Useful project/default options:
+
+```text
+--model PROVIDER/MODEL
+--thinking LEVEL          Pi thinking level, default medium
+--check COMMAND           check proposed integrations; --check '' clears it
+--image IMAGE             default bq-agent:local
+--pi-config PATH          Pi config directory, default ~/.pi/agent
+--max-repairs N           automatic repair attempts, default 3
+--env NAME                explicitly pass a host variable; repeatable
+--concurrency N           global scheduler target
+```
+
+Only variables named with `--env` are passed to a task. Host environment and
+proxy variables are not implicitly passed. `--env ''` clears the configured
+list. Pi `auth.json` and `models.json` are copied once into each task's private
+state and sessions survive repair runs. Only model/thinking defaults are read
+from Pi settings; host extensions and other settings are not imported.
+
+## Podman setup
+
+Requirements: Linux, Node.js 24.12+, Git, rootless Podman with subordinate
+UID/GID ranges in `/etc/subuid` and `/etc/subgid`, GNU `cp`, and `flock`.
+Btrfs is recommended for reflink-backed workspaces.
+
+The runner builds the bundled image automatically when a task first needs it.
+To use bq directly from this checkout without installing it:
 
 ```sh
 npm run build
-./dist/cli.js build
+./dist/cli.js run
 ```
 
-or install the package under `~/.local` and use its `bq` executable:
+If rootless Podman was just configured:
+
+```sh
+bq podman system migrate
+bq podman info
+```
+
+bq keeps its own Podman images and layers under
+`${XDG_DATA_HOME:-~/.local/share}/bq/podman/`; runtime state is under
+`${XDG_RUNTIME_DIR:-/run/user/$UID}/bq/`. Inspect that store with
+`bq podman ps`, `bq podman images`, or any other Podman arguments. Tasks use
+`--pull=never`; custom images must be built or pulled explicitly. Image builds
+and task runs disable implicit proxy forwarding.
+
+Install the local package and run continuously only if wanted:
 
 ```sh
 npm install --global --prefix "$HOME/.local" .
-bq build
+./deploy-local.sh
 ```
 
-- Linux
-- Node.js 24.12 or newer
-- Git
-- Rootless Podman, with subordinate UID/GID ranges in `/etc/subuid` and `/etc/subgid`
-- GNU `cp` and `flock` (from the standard coreutils/util-linux packages)
-- Btrfs (recommended, for reflink-backed task workspaces)
+Only invoking `deploy-local.sh` installs and starts the service. Neither
+`add` nor `run` installs a service.
 
-Check rootless setup with `bq podman info`. If it reports missing subordinate
-IDs, have an administrator allocate unused ranges to your user, then run
-`bq podman system migrate` before building the image.
+## Git integration and local files
 
-The bundled agent image contains Pi and its basic command-line dependencies.
-The worker uses Podman's `--pull=never`, so build the image locally (or pull it
-explicitly with `bq podman pull`) before queueing work:
+For each project, bq stores an integration clone under
+`${XDG_DATA_HOME:-~/.local/share}/bq/integrations/` and owns its
+`bq-integration` branch. Each task gets a private reflink-backed workspace.
+The canonical integration checkout is never left conflicted.
+
+Tracked files start at `bq-integration`. All ignored and untracked files from
+the original checkout are copied too, including `.env`, credentials,
+dependencies, and caches. Copies are private; resumed tasks keep their existing
+workspace. Uncommitted changes to tracked source files are not copied. Ignored
+inputs cannot be committed by a task; ordinary untracked files may be
+explicitly committed when required. Copying is not an atomic filesystem
+snapshot. Host dependencies may need rebuilding in the image, and the agent
+can read any secrets included in the workspace.
+
+Agents work in parallel. bq validates each candidate merge, runs the optional
+check command, and only then atomically advances `bq-integration`. A conflict
+wakes Pi with a resolution request. Upstream is fetched when work starts or
+when `bq sync [--cwd PATH]` is requested. A task is complete only after
+integration, not merely when Pi exits.
+
+Consume accepted work manually:
 
 ```sh
-bq build
-```
-
-`bq build` uses bq's private persistent Podman store, separate from your other
-Podman images. Inspect it with the same store using `bq podman ps`,
-`bq podman images`, or any other Podman arguments. The store is under
-`${XDG_DATA_HOME:-~/.local/share}/bq/podman/`; transient runtime files are
-under `${XDG_RUNTIME_DIR:-/run/user/$UID}/bq/`.
-
-The image tag defaults to `bq-agent:local`. Source files are TypeScript for
-development, but `npm run build` compiles the executable to `dist/`; the
-published/global package points at that JavaScript build because Node does not
-strip TypeScript inside installed packages.
-
-## Register a project
-
-```sh
-cd ~/project_a
-bq init . \
-  --branch main \
-  --image bq-agent:local \
-  --model anthropic/claude-sonnet-4-5 \
-  --check 'npm test'
-```
-
-`--model` is the model identifier passed to Pi. Other useful options are:
-
-```text
---thinking medium       Pi reasoning level (default: medium)
---env NAME               pass a named host environment variable to containers; repeatable
---pi-config PATH         Pi configuration directory (default: ~/.pi/agent)
---max-repairs N          automatic repair attempts (default: 3)
-```
-
-Each task copies `auth.json` and `models.json` from the selected Pi configuration
-directory once. Its private copies and session persist across resumptions. Global
-Pi extensions, skills, and packages are not loaded; the container uses the bundled
-Pi and the project's context files. Environment variables are passed only when
-listed with `--env`. Automatic proxy forwarding is disabled for builds and task
-containers; bq removes inherited host proxy settings from its Podman processes.
-
-The project must be a normal, non-bare Git repository and the upstream branch
-must already exist locally. Re-running `init` updates the image, model, checks,
-environment names, and repair limit; changing the registered branch is
-rejected.
-
-## Queue and run work
-
-```sh
-bq add --cwd ~/project_a 'Add a health endpoint and tests'
-bq list
-bq worker
-bq show 1
-```
-
-`bq worker` is normally run as a user service. A single worker is enforced by
-an OS lock, so starting a second worker is harmless. The worker starts as many
-containers as the runtime scheduler allows and waits for them to finish.
-
-Cancel or retry a task:
-
-```sh
-bq cancel 1
-bq retry 1
-```
-
-A task is complete only when its commits have been accepted into
-`bq-integration`. A clean agent exit is not by itself completion. If an agent
-leaves uncommitted changes, if integration conflicts, or if the configured
-checks fail, bq wakes Pi again with the concrete repair request. Failed repair
-loops eventually become `blocked`; `retry` resumes their saved workspace and session.
-Cancellation is refused once the short final publication step has begun. Stopping
-the worker leaves running containers intact; restarting it recovers them.
-
-## Average concurrency
-
-The scheduler targets average simultaneous container concurrency, not a money
-balance. Fractions are valid:
-
-```sh
-bq concurrency 0.2
-bq concurrency 1.5
-bq concurrency 3.14
-bq concurrency
-```
-
-Usage is measured internally in container milliseconds; `bq concurrency`
-reports the current balance in seconds. Idle time accrues bounded credit; the
-bound is one minute of target concurrency, so a machine cannot accumulate an
-unlimited burst after sitting idle. Running containers are never preempted.
-The instantaneous default ceiling is `ceil(target)`, and repair, conflict
-resolution, and checks consume the same runtime allowance. Set the target to
-zero to pause new starts without stopping running work:
-
-```sh
-bq concurrency 0
-bq concurrency 0.2
-```
-
-This is a long-run average: for example, target `0.2` permits about ten minutes
-of work followed by about forty minutes of repayment when there is one task
-running.
-
-## Git and local files
-
-For each registered repository bq keeps an integration clone under:
-
-```text
-${XDG_DATA_HOME:-~/.local/share}/bq/integrations/
-```
-
-It creates and owns the local `bq-integration` branch there. Each task gets a
-private workspace made from the integration snapshot. Btrfs reflinks make
-unchanged file contents share storage; when reflinks are unavailable bq falls
-back to regular copies.
-
-Tracked files come from `bq-integration`. All untracked and ignored files in
-the original project are copied into a new task workspace, including `.env`,
-local credentials, dependencies, and caches. Copying is isolated: task edits
-cannot modify the original directory or another task. New tasks snapshot the
-current local files; resumed tasks keep their existing workspace.
-
-Uncommitted edits to tracked files in the original directory are deliberately
-not copied. Untracked and ignored files are copied as local environment inputs,
-but are not automatically integrated: ignored inputs cannot be committed by a
-task, while an untracked file can be explicitly committed if the task requires
-it. Copying is not an atomic filesystem snapshot, so avoid changing local files
-while a task is being created. Host dependencies are available to the task but
-may need to be rebuilt for the container image. The agent is trusted with any
-secrets present in those files.
-
-Agents work in parallel on independent task branches. The harness serializes
-acceptance into `bq-integration`, tests candidate merges in disposable Git
-checkouts, and never leaves the canonical integration clone conflicted. If the
-source branch changes, bq fetches it when a task starts or `bq sync` is run. A
-conflict creates a resolution task rather than damaging the integration branch.
-
-To consume the result manually:
-
-```sh
-cd ~/project_a
-git fetch /path/to/integration-clone bq-integration
+git fetch ~/.local/share/bq/integrations/project-... bq-integration
 git merge FETCH_HEAD
 ```
 
-The integration clone path is shown by `bq list` and in the `project` object
-printed by `bq show`.
+The original repository's branch is never changed by bq.
 
-## Configuration and state
-
-By default:
-
-```text
-${XDG_DATA_HOME:-~/.local/share}/bq/       integration clones and workspaces
-${XDG_STATE_HOME:-~/.local/state}/bq/     queue.sqlite, logs, and locks
-```
-
-Use `BQ_DATA_HOME` and `BQ_STATE_HOME` to override those roots. The new queue
-uses `queue.sqlite`; it does not read the database from the old Python
-implementation.
-
-## Run continuously
-
-Install the local package and enable the user service yourself:
+## Advanced commands and state
 
 ```sh
-./deploy-local.sh
-journalctl --user -u bq-worker -f
+bq sync [--cwd PATH]
+bq build [--tag IMAGE]
+bq podman ARGS...
+bq help --all
 ```
 
-`deploy-local.sh` does not push, install a remote package, or enable anything
-until you run it. It installs the executable under `~/.local/bin` and updates
-the user service definition.
+State defaults to `${XDG_STATE_HOME:-~/.local/state}/bq/queue.sqlite`; data
+and integration clones default to `${XDG_DATA_HOME:-~/.local/share}/bq/`.
+Override them with `BQ_STATE_HOME` and `BQ_DATA_HOME`.
 
-## Development
+Development and the real local smoke test:
 
 ```sh
 npm test
 npm run build
-```
-
-After building the agent image, run the real container smoke test:
-
-```sh
 npm run test:podman
 ```
 
-It runs the real Pi against a local deterministic test API, so no provider
-credentials or paid model calls are needed. It checks session continuation,
-local-file mounts, Git integration, container recovery, and cancellation.
-
-The implementation intentionally uses Node's built-in TypeScript stripping and
-SQLite APIs; there are no runtime or development package dependencies.
+The smoke test uses a local deterministic API and makes no paid model calls.

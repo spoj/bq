@@ -1,6 +1,6 @@
 import { createConnection, createServer } from 'node:net';
 import { mkdir, rm } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { Store, type Project, type Task, type Run } from './store.ts';
 import { canStart, nextAdmission } from './policy.ts';
 import {
@@ -65,7 +65,7 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
     if (Number(await git(project.integration, ['rev-list', '--count', `refs/heads/bq-integration..${upstream}`])) === 0) return;
     if (store.tasks().some(task => task.projectId === project.id && task.kind === 'upstream' && !['done', 'canceled'].includes(task.status))) return;
     const task = store.add(project.id, `Integrate upstream ${project.branch} at ${upstream}. Preserve both upstream changes and accepted task work.`, upstream);
-    console.log(`Task ${task.id}: upstream synchronization queued`);
+    console.log(`#${task.id} queued · upstream sync for ${basename(project.source)}`);
     wake();
   };
 
@@ -101,7 +101,7 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
       return;
     }
     store.updateTask(task.id, { status: 'done', result: task.candidateHead, error: null });
-    console.log(`Task ${task.id}: integrated ${task.candidateHead}`);
+    console.log(`#${task.id} done · ${task.candidateHead!.slice(0, 12)}`);
     await rm(dirname(task.workspace), { recursive: true, force: true });
     store.requestSync(project.id);
   };
@@ -118,7 +118,7 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
         ? await startAgent({ name: run.name, dataDir: store.dataDir, workspace: task.workspace, stateDir: task.stateDir, prompt: task.nextPrompt ?? task.prompt, config: project })
         : await startCheck({ name: run.name, dataDir: store.dataDir, workspace: candidatePath(task), stateDir: task.stateDir, command: project.checkCommand!, config: project });
       watch(run, container.done);
-      console.log(`Task ${task.id}: ${kind} started (${run.name})`);
+      console.log(`#${task.id} ${kind === 'agent' ? 'working' : 'checking'} · ${basename(project.source)}`);
     } catch (error) {
       completions.push({ run, exitCode: -1, error: String(error) });
       wake();
@@ -238,7 +238,10 @@ export async function work(store: Store, options: { signal?: AbortSignal } = {})
               wake();
             } else if (candidate.status === 'noop') {
               const completed = store.db.prepare("UPDATE tasks SET status='done',result=?,error=NULL,updatedAt=? WHERE id=? AND status='integrating'").run(candidate.head, Date.now(), task.id);
-              if (completed.changes) await rm(dirname(task.workspace), { recursive: true, force: true });
+              if (completed.changes) {
+                console.log(`#${task.id} done · no new commits`);
+                await rm(dirname(task.workspace), { recursive: true, force: true });
+              }
             } else {
               store.updateTask(task.id, { candidateHead: candidate.head, candidateBase: candidate.base });
               task = store.task(task.id);
